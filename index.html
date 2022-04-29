@@ -1,0 +1,2155 @@
+<script type="text/javascript">
+    // TODO:
+//   . Execution without yields
+//   . Methods and fields with the same name?
+
+const COST_LIMIT = 10000000;
+
+BigInt.prototype.toJSON = function() { return this.toString() }
+
+let _cloneObj = function(o) {
+    return JSON.parse(JSON.stringify(o));
+}
+
+let stringify = function(obj, space) {
+    var allKeys = [];
+    var seen = {};
+    JSON.stringify(obj, function (key, value) { if (!(key in seen)) { allKeys.push(key); seen[key] = null; } return value; });
+    allKeys.sort();
+    return JSON.stringify(obj, allKeys, space);
+}
+
+let _color = function(context, v) {
+    if (v.r < 0n || v.r > 255n || v.b < 0n || v.b > 255n || v.g < 0n || v.g > 255n || v.a < 0 || v.a > 1 || isNaN(v.a)) {
+        context.stack.pop();
+        context['throw']("Invalid color");
+    }
+
+    return "rgba(" + Number(v.r) + "," + Number(v.g) + "," + Number(v.b) + "," + Number(v.a) + ")"
+}
+
+let _stype = function(t) {
+    if (t == 'int' || t == 'float' || t == 'bool' || t == 'string') { return {'t': t} }
+    if (t['t'] !== undefined) return t;
+    return {'t': 'record', 'record': t}
+}
+
+let _ctx = function(context) {
+    let ret = context.vars['self']['ctx'];
+    if (ret === undefined) {
+        context.stack.pop();
+        context['throw']("Canvas is not initialized");
+    }
+    return ret;
+}
+
+let CrowdScript = {};
+
+let CrowdScriptBuiltins = {
+    'rand_int': function(context) { context["return"](BigInt(Math.floor(Math.random() * Number(context.vars["mx"])))) },
+    'rand_bool': function(context) { context["return"](Math.random() < 0.5) },
+    'chr': function(context) { context["return"](String.fromCharCode(Number(context['vars'].a))) },
+    'sin': function(context) { context["return"](Math.sin(context['vars'].a)) },
+    'cos': function(context) { context["return"](Math.cos(context['vars'].a)) },
+    'tan': function(context) { context["return"](Math.tan(context['vars'].a)) },
+    'asin': function(context) { context["return"](Math.asin(context['vars'].a)) },
+    'acos': function(context) { context["return"](Math.acos(context['vars'].a)) },
+    'atan': function(context) { context["return"](Math.atan(context['vars'].a)) },
+    'atan2': function(context) { context["return"](Math.atan2(context['vars'].y, context['vars'].x)) },
+    'sqrt': function(context) { context["return"](Math.sqrt(context['vars'].a)) },
+    'log': function(context) { context["return"](Math.log(context['vars'].a)) },
+    'exp': function(context) { context["return"](Math.exp(context['vars'].a)) },
+
+    'Canvas.init': function(context) { let v = context["vars"]; let c = document.createElement('canvas'); let ctx = c.getContext("2d"); c.width = Number(v.width); c.height = Number(v.height); v["self"].canvas = c; v["self"].ctx = ctx; ctx.fillStyle = _color(context, v.color); ctx.fillRect(0, 0, Number(v.width), Number(v.height)) },
+    'Canvas.rect': function(context) { let v = context["vars"]; let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.strokeStyle = _color(context, v.color); ctx.beginPath(); ctx.rect(Number(v.left), Number(v.top), Number(v.width), Number(v.height)); ctx.stroke(); },
+    'Canvas.fill_rect': function(context) { let v = context["vars"]; let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.strokeStyle = _color(context, v.color); ctx.fillStyle = _color(context, v.fill_color); ctx.beginPath(); ctx.rect(Number(v.left), Number(v.top), Number(v.width), Number(v.height)); ctx.fill(); ctx.stroke(); },
+    'Canvas.ellipse': function(context) { let v = context["vars"]; let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.strokeStyle = _color(context, v.color); ctx.beginPath(); ctx.ellipse(Number(v.left) + Number(v.width) / 2, Number(v.top) + Number(v.height) / 2, Number(v.width) / 2, Number(v.height) / 2, 0, 0, Math.PI * 2); ctx.stroke(); },
+    'Canvas.fill_ellipse': function(context) { let v = context["vars"]; let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.strokeStyle = _color(context, v.color); ctx.fillStyle = _color(context, v.fill_color); ctx.beginPath(); ctx.ellipse(Number(v.left) + Number(v.width) / 2, Number(v.top) + Number(v.height) / 2, Number(v.width) / 2, Number(v.height) / 2, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); },
+    'Canvas.line': function(context) { let v = context["vars"]; let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.strokeStyle = _color(context, v.color); ctx.beginPath(); ctx.moveTo(Number(v.x1), Number(v.y1)); ctx.lineTo(Number(v.x2), Number(v.y2)); ctx.stroke(); },
+    'Canvas.fill_polygon': function(context) { let v = context["vars"]; if (v.points.length == 0) { return; } let ctx = _ctx(context); ctx.lineWidth = Number(v.thickness); ctx.fillStyle = _color(context, v.fill_color); ctx.strokeStyle = _color(context, v.color); ctx.beginPath(); ctx.moveTo(Number(v.points[0].x), Number(v.points[0].y)); for (let i = 1; i < v.points.length; ++ i) { ctx.lineTo(Number(v.points[i].x), Number(v.points[i].y)); } ctx.closePath(); ctx.fill(); ctx.stroke(); },
+    'Canvas.text': function(context) { let v = context["vars"]; if (v.align != 'center' && v.align != 'left' && v.align != 'right') { context.stack.pop(); context['throw']('Invalid value fot `align`') } let ctx = _ctx(context); ctx.fillStyle = _color(context, v.color); ctx.textAlign = v.align; ctx.font = Number(v.size) + 'px Arial'; ctx.fillText(v.text, Number(v.x), Number(v.y)); },
+
+    'rgb': function(context) { let v = _cloneObj(context["vars"]); v['a'] = 1; _color(context, v); context['return']({'r': v.r, 'g': v.g, 'b': v.b, 'a': v.a})},
+    'rgba': function(context) { let v = context["vars"]; _color(context, v); context['return']({'r': v.r, 'g': v.g, 'b': v.b, 'a': v.a})},
+};
+
+let _getDefaultRecordsAndMethods = function(with_nightsky) {
+    let f = function(p, n, args, r, body) {
+        let a = p == null ? [] : [{'type': {'t': 'record', 'record': records[p]}, 'name': 'self'}];
+        let fq = p == null ? n : p + '$' + n;
+        let func = {'args': a, 'returnType': _stype(r), 'body': 'CrowdScriptBuiltins["' + fq + '"](context)', 'builtin': true};
+        for (let arg of args) {
+            func.args.push({'type': _stype(arg[0]), 'name': arg[1]});
+        }
+        funcs[fq] = func;
+    }
+
+    let records = with_nightsky ? {
+        'Color': {'name': 'Color', 'fields': ['r', 'g', 'b'], 'fieldTypes': {'r': {'t': 'int'}, 'g': {'t': 'int'}, 'b': {'t': 'int'}, 'a': {'t': 'float'}}},
+        'Canvas': {'name': 'Canvas', 'fields': [], 'fieldTypes': {}},
+        'Point2D': {'name': 'Point2D', 'fields': ['x', 'y'], 'fieldTypes': {'x': {'t': 'float'}, 'y': {'t': 'float'}}},
+        'Arrows': {'name': 'Arrows', 'fields': ['canvas', 'arrows', 'with_count'], 'fieldTypes': {'canvas': {'t': 'record', 'record': null}, 'arrows': {'t': 'list', 'subtype': {'t': 'record', 'record': null}}, 'with_count': {'t': 'bool'}}},
+    } : {};
+    if (with_nightsky) {
+        records['Arrows'].fieldTypes['canvas'].record = records['Canvas'];
+        records['Arrows'].fieldTypes['arrows'].subtype.record = records['Point2D'];
+    }
+    let funcs = {};
+
+    f(null, 'rand_int', [['int', 'mx']], 'int');
+    f(null, 'rand_bool', [], 'bool');
+    f(null, 'chr', [['int', 'a']], 'string');
+    f(null, 'sin', [['float', 'a']], 'float');
+    f(null, 'cos', [['float', 'a']], 'float');
+    f(null, 'tan', [['float', 'a']], 'float');
+    f(null, 'asin', [['float', 'a']], 'float');
+    f(null, 'acos', [['float', 'a']], 'float');
+    f(null, 'atan', [['float', 'a']], 'float');
+    f(null, 'atan2', [['float', 'y'], ['float', 'x']], 'float');
+    f(null, 'sqrt', [['float', 'a']], 'float');
+    f(null, 'log', [['float', 'a']], 'float');
+    f(null, 'exp', [['float', 'a']], 'float');
+
+    if (with_nightsky) {
+        f('Canvas', 'init', [['int', 'width'], ['int', 'height'], [records['Color'], 'color']], 'void');
+        f('Canvas', 'rect', [['int', 'left'], ['int', 'top'], ['int', 'width'], ['int', 'height'], [records['Color'], 'color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'fill_rect', [['int', 'left'], ['int', 'top'], ['int', 'width'], ['int', 'height'], [records['Color'], 'color'], [records['Color'], 'fill_color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'ellipse', [['int', 'left'], ['int', 'top'], ['int', 'width'], ['int', 'height'], [records['Color'], 'color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'fill_ellipse', [['int', 'left'], ['int', 'top'], ['int', 'width'], ['int', 'height'], [records['Color'], 'color'], [records['Color'], 'fill_color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'line', [['int', 'x1'], ['int', 'y1'], ['int', 'x2'], ['int', 'y2'], [records['Color'], 'color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'fill_polygon', [[{'t': 'list', 'subtype': {'t': 'record', 'record': records['Point2D']}}, 'points'], [records['Color'], 'color'], [records['Color'], 'fill_color'], ['int', 'thickness']], 'void');
+        f('Canvas', 'text', [['int', 'x'], ['int', 'y'], ['string', 'text'], ['int', 'size'], [records['Color'], 'color'], ['string', 'align']], 'void');
+
+        f(null, 'rgb', [['int', 'r'], ['int', 'g'], ['int', 'b']], records['Color']);
+        f(null, 'rgba', [['int', 'r'], ['int', 'g'], ['int', 'b'], ['float', 'a']], records['Color']);
+    }
+
+    return {'funcs': funcs, 'records': records};
+}
+
+function getCppType(t) {
+    if (t.t == 'void') {
+        return 'void';
+    } else if (t.t == 'bool') {
+        return 'char';
+    } else if (t.t == 'int') {
+        return 'int64_t';
+    } else if (t.t == 'float') {
+        return 'double';
+    } else if (t.t == 'list') {
+        return "List<" + getCppType(t.subtype) + ">";
+    } else if (t.t == 'dict') {
+        return "Dict<" + getCppType(t.keyType) + "," + getCppType(t.valueType) + ">"
+    } else if (t.t == 'record') {
+        return "std::shared_ptr<" + t.record.name + ">";
+    } else if (t.t == 'string') {
+        return 'String';
+    } else if (t.t == 'emptylist') {
+        return 'EmptyList';
+    } else if (t.t == 'emptydict') {
+        return 'EmptyDict';
+    } else if (t.t == 'null') {
+        return 'std::nullptr_t';
+    } else {
+        throw "Unknown type " + t.t
+    }
+}
+
+function CPPEmitter() {
+    this.emitInt = function(s) { return s + "ll"; }
+    this.emitMakeRecord = function(recordName, recordFields, exprs, _) {
+        let s = 'std::shared_ptr<' + recordName + '>(new ' + recordName + '{'
+        for (let i = 0; i < exprs.length; ++ i) {
+            if (i != 0) { s += ',' }
+            s += exprs[i].s;
+        }
+        s += '})'
+        return s;
+    }
+    this.emitStringConstant = function(quoteEnclosed) { return "String(" + quoteEnclosed + ")" }
+    this.emitListStart = function(t) { let ct = getCppType(t); return "List<" + ct + ">(std::vector<" + ct + ">({" };
+    this.emitListEnd = function() { return "}))"; }
+    this.emitDictStart = function(k, v) { let ck = getCppType(k); let cv = getCppType(v); return "Dict<" + ck + "," + cv + ">(std::vector<std::pair<" + ck + ", " + cv + ">>({" };
+    this.emitDictPair = function(k, v) { return "{" + k + "," + v + "}" };
+    this.emitDictEnd = function() { return "}))" };
+    this.emitEmptyList = function() { return "EmptyList()" }
+    this.emitEmptyDict = function() { return "EmptyDict()" }
+    this.emitListElem = function(t, release, listS, idxS) {
+        return  '(' + listS + ')[' + idxS + ']';
+    }
+    this.emitCharCodeAt = function(release, listS, idxS) {
+        return  '(int64_t)((' + listS + ').charCodeAt(' + idxS + '))';
+    }
+    this.emitFieldAccess = function(lastS, fieldS) {
+        return lastS + "->" + fieldS;
+    }
+    this.emitNull = function() { return "nullptr" }
+    this.emitLength = function(t, exprS) { return '(int64_t)((' + exprS + ').length())' }
+    this.emitCast = function(t, exprT, exprS) {
+        if (t.s == 'int') return 'cast_int(' + exprS + ')';
+        else if (t.s == 'float') return 'cast_float(' + exprS + ')';
+        else return 'cast_str(' + exprS + ')';
+    }
+    this.emitDictKeys = function(lastS) {
+        return '(' + lastS + ').keys()';
+    }
+    this.emitLINQClosureOpener = function(varNameS, varType, release) {
+        return "[=](" + getCppType(varType) + " " + varNameS + ")"+ " { return ";
+    }
+    this.emitLINQ = function(closureOpening, listExprS, whereCondS, selectExprS, retSubtype) {
+        let s = "linq(" + listExprS + ", ";
+        if (whereCondS != null) {
+            s += closureOpening + whereCondS + "; }, "
+        } else {
+            s += closureOpening + "true;  }, "
+        }
+        s += closureOpening + selectExprS + "; }, TypeHolder<" + getCppType(retSubtype) + ">())"
+        return s;
+    }
+    this.emitSort = function(lastS, argType, callAB, callBA) {
+        return "(" + lastS + ").sort([](" + getCppType(argType) + " a, " + getCppType(argType) + " b) { return " + callAB + "; })";
+    }
+
+    this.emitLet = function(t) { return getCppType(t) };
+}
+
+function JSEmitter(release) {
+    this.emitInt = function(s) { return s + "n"; }
+    this.emitMakeRecord = function(recordName, recordFields, exprs, lessFn) {
+        let s = 'context.makeRecord(' + lessFn + ')(';
+        for (let i = 0; i < exprs.length; ++ i) {
+            if (i != 0) { s += ',' }
+            s += '"' + recordFields[i] + '", ' + exprs[i].s;
+        }
+        s += ')';
+        return s;
+    }
+    this.emitStringConstant = function(quoteEnclosed) { return quoteEnclosed }
+    this.emitListStart = function() { return "[" };
+    this.emitListEnd = function() { return "]" };
+    this.emitDictStart = function() { return "context.makeDict(" };
+    this.emitDictPair = function(k, v) { return k + ',' + v };
+    this.emitDictEnd = function() { return ")" };
+    this.emitEmptyList = function() { return "[]" }
+    this.emitEmptyDict = function() { return "context.makeDict()" }
+    this.emitListElem = function(t, release, listS, idxS) {
+        if ((t.t == 'list' || t.t == 'string') && release) {
+            return  '(' + listS + ')[' + idxS + ']';
+        } else {
+            return 'context.listElem("' + t.t + '", ' + listS + ', ' + idxS + ').inner';
+        }
+    }
+    this.emitCharCodeAt = function(release, listS, idxS) {
+        let ret = this.emitListElem({'t': 'string'}, release, listS, idxS);
+        return "BigInt(" + ret + '.charCodeAt(0))';
+    }
+    this.emitFieldAccess = function(lastS, fieldS) {
+        return "context.nullCheck(" + lastS + ")." + fieldS;
+    }
+    this.emitNull = function() { return "null" }
+    this.emitLength = function(t, exprS) {
+        if (t.t == 'dict') {
+            return "BigInt(context.dictKeys(" + exprS + ").length)";
+        } else {
+            return "BigInt((" + exprS + ").length)";
+        }
+    }
+    this.emitCast = function(t, exprT, exprS) {
+        if (t.s == 'int') {
+            if (exprT.t == 'float') {
+                return 'context.parseInt(parseInt(' + exprS + '))';
+            }
+            return 'context.parseInt(' + exprS + ')';
+        }
+        else if (t.s == 'float') return 'parseFloat(' + exprS + ')';
+        else return '("" + (' + exprS + '))';
+    }
+    this.emitDictKeys = function(lastS) {
+        return "context.dictKeys(" + lastS + ")";
+    }
+    this.emitLINQClosureOpener = function(varNameS, varType, release) {
+        let closureOpening = "function (" + varNameS + ")"+ " { ";
+        if (!release)  {
+            closureOpening += "context.vars['" + varNameS + "'] = " + varNameS + "; ";
+        }
+        closureOpening += "return "
+        return closureOpening;
+    }
+    this.emitLINQ = function(closureOpening, listExprS, whereCondS, selectExprS) {
+        let s = "((" + listExprS + ")";
+        if (whereCondS != null) {
+            s += ".filter(" + closureOpening + whereCondS + "})"
+        }
+        s += ".map(" + closureOpening + selectExprS + "}))"
+        return s;
+    }
+    this.emitSort = function(lastS, argType, callAB, callBA) {
+        return "(" + lastS + ").sort((a, b) => (" + callAB + ") ? -1 : (" + callBA + " ? 1 : 0))";
+    }
+
+    this.emitLet = function() {return "let"};
+}
+
+CrowdScript.parse = function(s, config) {
+    if (!config) { config = {'release': false, 'pillar_builtints': true} }
+
+    let emitter;
+    if (!!config['cpp']) {
+        emitter = new CPPEmitter();
+    } else {
+        emitter = new JSEmitter(config['release']);
+    }
+
+    let pos = 0;
+    let posReadable = {
+        'row': 1,
+        'col': 1,
+    };
+    let returned = null;
+    let clonePos = function() {
+        return {'row': posReadable.row, 'col': posReadable.col};
+    }
+    let E = function(where, what) {
+        throw {
+            'kind': 'compile',
+            'pos': _cloneObj(where),
+            'msg': what,
+        }
+    }
+
+    let N = function() {
+        if (C() == '\n') {
+            ++ posReadable.row;
+            posReadable.col = 1;
+        } else {
+            ++ posReadable.col;
+        }
+        ++ pos;
+    }
+
+    let W = function() {
+        let oneMore = true;
+        while (pos < s.length) {
+            oneMore = false;
+
+            if (C() == ' ' || C() == '\n' || C() == '\t') {
+                N();
+                continue;
+            }
+
+            if (pos + 1 < s.length && s[pos] == '/' && s[pos + 1] == '/') {
+                while (pos < s.length && C() != '\n') N();
+                continue;
+            }
+            if (pos + 1 < s.length && s[pos] == '/' && s[pos + 1] == '*') {
+                N(); N(); last = C(); N();
+                while (last != '*' || C() != '/') {
+                    last = C(); N();
+                }
+                N();
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    let C = function() {
+        if (pos < s.length) { return s[pos]; }
+        else { E(posReadable, "Unexpected end") }
+    };
+
+    let R = function(s) {
+        returned = s;
+    }
+
+    let T = function() {
+        if (returned !== null) {
+            let ret = returned;
+            returned = null;
+            return ret;
+        }
+        while (true) {
+            W();
+            let started = pos;
+            let startedReadable = clonePos();
+            let c = C(); N();
+            let p = (pos < s.length) ? C() : null;
+            
+            let ret = function(s) {
+                return {'s': s, 'pos': startedReadable}
+            }
+
+            if (c >= '0' && c <= '9') {
+                let hasDot = false;
+                while (C() >= '0' && C() <= '9' || (C() == '.' && !hasDot)) {
+                    if (C() == '.') {
+                        hasDot = true;
+                    }
+                    N();
+                }
+                return ret(s.substring(started, pos));
+            }
+            if (c == '"') {
+                let last = c;
+                while (C() != '"' || last == '\\') {
+                    last = C();
+                    N();
+                }
+                N();
+                let subs = s.substring(started, pos);
+                try {
+                    JSON.parse(subs)
+                } catch(e) {
+                    E(startedReadable, "Invalid string constant");
+                }
+                return ret(subs);
+            }
+            if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_') {
+                while (C() >= 'a' && C() <= 'z' || C() >= 'A' && C() <= 'Z' || C() == '_' || C() >= '0' && C() <= '9') N();
+                return ret(s.substring(started, pos));
+            }
+            if (c == '-') {
+                if (p == '-' || p == '=' || p == '>') {
+                    N();
+                    return ret(c + p);
+                }
+                return ret(c);
+            }
+            if (c == '|' || c == '&' || c == '=' || c == '>' || c == '<') {
+                if (p == c || p == '=') {
+                    N();
+                    return ret(c + p);
+                }
+                return ret(c);
+            }
+            if (c == '!' || c == '+' || c == '*' || c == '/' || c == '%' || c == '^') {
+                if (p == '=') {
+                    N();
+                    return ret(c + p);
+                }
+                return ret(c);
+            }
+            if (c == '[' || c == ']' || c == '{' || c == '}' || c == '(' || c == ')' || c == ':' || c == ';' || c == ',' || c == '.' || c == '~') {
+                return ret(c);
+            }
+            E(startedReadable, "Unexpected character: " + c);
+        }
+    }
+
+    let S = function(t) {
+        let got = T();
+        if (got.s != t) {
+            E(got.pos, "Expected " + t + ", got " + got.s);
+        }
+    }
+
+    let isI = function(s) {
+        return s.length > 0 && (s[0] >= 'a' && s[0] <= 'z' || s[0] >= 'A' && s[0] <= 'Z' || s[0] == '_') && s != 'if' && s != 'while' && s != 'for' && s != 'new' && s != 'let' && s != 'true' && s != 'false' && s != 'null' && s != 'int' && s != 'float' && s != 'string' && s != 'this';
+    }
+
+    let I = function() {
+        let got = T();
+        if (!isI(got.s)) {
+            E(got.pos, "Expected identifier, got " + got.s);
+        }
+        return got;
+    }
+
+    let skipIf = function(s) {
+        let t = T();
+        if (t.s == s) {
+            return true;
+        } else {
+            R(t);
+            return false;
+        }
+    }
+
+    let oneOf = function(options) {
+        let t = T();
+        for (let option of options) {
+            if (option == t.s) {
+                return option;
+            }
+        }
+        E(t.pos, "Expected one of " + JSON.stringify(options) + ", got " + t.s);
+    }
+
+    let getLessFunc = function(recordName) {
+        let funcName = recordName + '$less';
+        let f = ret.funcs[funcName];
+        if (f !== undefined) {
+            if (f.returnType.t == 'bool' && f.args.length == 2 && f.args[0].type.t == 'record' && f.args[1].type.t == 'record' && f.args[0].type.record.name == recordName && f.args[1].type.record.name == recordName) {
+                let arg1 = f.args[0].name;
+                let arg2 = f.args[1].name;
+                return function(x, y) { return config.release ? funcName + "(" + x + ",  " + y + ")" : "context.funcCall(context.funcs['" + funcName + "'], {'" + arg1 + "': " + x + ", '" + arg2 + "': " + y + "})" }
+            }
+        }
+        return null;
+    }
+
+    let parseType = function(depth) {
+        if (!depth) { depth = 0 }
+        if (depth >= 100) {
+            E(posReadable, "Stack overflow during parsing. Simplify the type.");
+        }
+
+        let t = T();
+        let ret;
+        if (t.s == 'int') {
+            ret = {'t': 'int'};
+        } else if (t.s == 'float') {
+            ret = {'t': 'float'};
+        } else if (t.s == 'string') {
+            ret = {'t': 'string'};
+        } else if (t.s == 'bool') {
+            ret = {'t': 'bool'};
+        } else if (t.s == '{') {
+            let keyType = parseType(depth + 1);
+            S(':');
+            let valueType = parseType(depth + 1);
+            S('}');
+            if (keyType.t == 'record') {
+                if (null == getLessFunc(keyType.record.name)) {
+                    E(t.pos, "Map key must have a method `function less(self: T, other: T) -> bool { }`");
+                }
+            } else if (keyType.t != 'int' && keyType.t != 'string') {
+                E(t.pos, "Key type can only be struct, int or string");
+            }
+            ret = {'t': 'dict', 'keyType': keyType, 'valueType': valueType};
+        } else if (t.s in records) {
+            ret = {'t': 'record', 'record': records[t.s]};
+        } else {
+            E(t.pos, "Expected type, got " + t.s);
+        }
+
+        while (skipIf('[')) {
+            S(']');
+            ret = {'t': 'list', 'subtype': ret};
+        }
+
+        return ret;
+    }
+
+    let opPriority = function(op) {
+        if (op == '*' || op == '/' || op == '%') return 1;
+        if (op == '+' || op == '-') return 2;
+        if (op == '<<' || op == '>>') return 3;
+        if (op == '&') return 4;
+        if (op == '^') return 5;
+        if (op == '|') return 6;
+        if (op == '<' || op == '>' || op == '<=' || op == '>=') return 7;
+        if (op == '==' || op == '!=') return 8;
+        if (op == '&&') return 9;
+        if (op == '||') return 10;
+        return null;
+    }
+
+    let deriveCommonType = function(t1, t2) {
+        // It's important to check for 'list' (dict, record) first before checking basic types, to handle 'list' + 'emptylist' and similar pairs
+        if (t1.t == 'list' || t2.t == 'list') {
+            if (t1.t == 'emptylist') { return t2 }
+            if (t2.t == 'emptylist') { return t1 }
+            if (t1.t == 'list' && t2.t == 'list') {
+                let subtype = deriveCommonType(t1.subtype, t2.subtype);
+                if (subtype == null) {
+                    return null;
+                }
+                return {'t': 'list', 'subtype': subtype}
+            }
+            return null;
+        } else if (t1.t == 'dict' || t2.t == 'dict') {
+            if (t1.t == 'emptydict') { return t2 }
+            if (t2.t == 'emptydict') { return t1 }
+            if (t1.t == 'dict' && t2.t == 'dict') {
+                let keyType = deriveCommonType(t1.keyType, t2.keyType);
+                let valueType = deriveCommonType(t1.valueType, t2.valueType);
+                if (keyType == null || valueType == null) {
+                    return null;
+                }
+                return {'t': 'dict', 'keyType': keyType, 'valueType': valueType}
+            }
+            return null;
+        } else if (t1.t == 'record' || t2.t == 'record') {
+            if (t1.t == 'null') { return t2 }
+            if (t2.t == 'null') { return t1 }
+            if (t1.t == 'record' && t2.t == 'record') {
+                if (t1.record.name != t2.record.name) {
+                    return null;
+                }
+                return t1;
+            }
+            return null;
+        } else if (t1.t == 'int' || t1.t == 'float' || t1.t == 'bool' || t1.t == 'string' || t1.t == 'emptylist' || t1.t == 'emptydict' || t1.t == 'null') {
+            return (t1.t == t2.t) ? t1 : null;
+        }
+    }
+
+    let checkOpTypes = function(op, t1, t2, pos) {
+        if (op == '+') {
+            if (t1.t == 'int' && t2.t == 'int') { return {'t': 'int'} }
+            if (t1.t == 'float' && t2.t == 'float') { return {'t': 'float'} }
+            if (t1.t == 'string' && t2.t == 'string') { return {'t': 'string'} }
+            if ((t1.t == 'emptylist' || t1.t == 'list') && (t2.t == 'emptylist' || t2.t == 'list')) {
+                let ret = deriveCommonType(t1, t2);
+                if (ret == null) {
+                    E(pos, "Cannot concatenate two lists with different element types");
+                }
+                return ret;
+            }
+            E(pos, "Cannot add " + t1.t + " and " + t2.t);
+        } else if (op == '-' || op == '*' || op == '/' || op == '%') {
+            if (t1.t == 'int' && t2.t == 'int') { return {'t': 'int'} }
+            if (t1.t == 'float' && t2.t == 'float') { return {'t': 'float'} }
+            E(pos, "Wrong arguments for " + op + ": " + t1.t + " and " + t2.t);
+        } else if (op == '|' || op == '&' || op == '^' || op == '<<' || op == '>>') {
+            if (t1.t == 'int' && t2.t == 'int') { return {'t': 'int'} }
+            E(pos, "Wrong arguments for " + op + ": " + t1.t + " and " + t2.t);
+        } else if (op == '>' || op == '<' || op == '>=' || op == '<=') {
+            if (t1.t == 'int' && t2.t == 'int') { return {'t': 'bool'} }
+            if (t1.t == 'float' && t2.t == 'float') { return {'t': 'bool'} }
+            if (t1.t == 'string' && t2.t == 'string') { return {'t': 'bool'} }
+            E(pos, "Wrong arguments for " + op + ": " + t1.t + " and " + t2.t);
+        } else if (op == '==' || op == '!=') {
+            if (t1.t == 'int' && t2.t == 'int') { return {'t': 'bool'} }
+            if (t1.t == 'float' && t2.t == 'float') { return {'t': 'bool'} }
+            if (t1.t == 'string' && t2.t == 'string') { return {'t': 'bool'} }
+            if (t1.t == 'bool' && t2.t == 'bool') { return {'t': 'bool'} }
+            if (t1.t == 'record' && t2.t == 'null') { return {'t': 'bool'} }
+            if (t1.t == 'null' && t2.t == 'record') { return {'t': 'bool'} }
+            E(pos, "Wrong arguments for " + op + ": " + t1.t + " and " + t2.t);
+        } else if (op == '||' || op == '&&') {
+            if (t1.t == 'bool' && t2.t == 'bool') { return {'t': 'bool'} }
+            E(pos, "Wrong arguments for " + op + ": " + t1.t + " and " + t2.t);
+        } else {
+            E(pos, "Operator " + op + " is not implemented yet")
+        }
+    }
+
+    let parseSingle = function(context, depth) {
+        let t = T();
+        if (t.s == '(') {
+            let ret = parseExpr(context, depth + 1);
+            ret.s = '(' + ret.s + ')';
+            S(')');
+            return ret;
+        } else if (t.s[0] == '"') {
+            return {'s': emitter.emitStringConstant(t.s), 'type': {'t': 'string'}, 'pos': t.pos, 'cost': 1};
+        } else if (t.s == 'new') {
+            let recordName = I();
+            let cost = 1;
+            if (!(recordName.s in records)) {
+                E(recordName.pos, "Unknown record " + recordName.s);
+            }
+            let record = records[recordName.s];
+            let exprs = [];
+            S('{');
+            let first = true;
+            for (let field of record.fields) {
+                if (!first) { S(',') };
+                first = false;
+                S(field);
+                S(':');
+                let expr = parseExpr(context, depth + 1);
+
+                if (null == deriveCommonType(record.fieldTypes[field], expr.type)) {
+                    E(expr.pos, "Type mismatch");
+                }
+
+                exprs.push(expr);
+                cost += expr.cost;
+            }
+            S('}');
+            let call = getLessFunc(record.name);
+            let lessFn = call == null ? "null" : "function(a, b) { return " + call("a", "b") + " }"
+            return {'s': emitter.emitMakeRecord(record.name, record.fields, exprs, lessFn), 'type': {'t': 'record', 'record': record}, 'pos': t.pos, 'cost': cost};
+        } else if (t.s == 'int' || t.s == 'float' || t.s == 'string') {
+            S('(');
+            let expr = parseExpr(context, depth + 1);
+            S(')');
+            if (expr.type.t != 'int' && expr.type.t != 'float' && expr.type.t != 'string' && !(expr.type.t == 'bool' && t.s == 'string')) {
+                E(t.pos, "Cannot cast an expression of type " + expr.type.t + " to " + t.s);
+            }
+            return {'s': emitter.emitCast(t, expr.type, expr.s), 'type': {'t': t.s}, 'pos': t.pos, 'cost': expr.cost + 1};
+        } else if (t.s == '[') {
+            let n = T();
+            if (n.s == ']') {
+                return {'s': emitter.emitEmptyList(), 'type': {'t': 'emptylist'}, 'pos': t.pos, 'cost': 1};
+            } else if (n.s == 'from') {
+                let ret = parseLINQ(context, depth + 1);
+                S(']');
+                return ret;
+            } else {
+                R(n);
+                let s = '';
+                let cost = 1;
+                let subtype = null;
+                while (true) {
+                    let e = parseExpr(context, depth + 1);
+                    cost += e.cost;
+                    if (subtype == null) {
+                        subtype = e.type;
+                    } else {
+                        subtype = deriveCommonType(subtype, e.type);
+                        if (subtype == null) {
+                            E(e.pos, "All list elements must have the same type.");
+                        }
+                    }
+
+                    s += e.s;
+                    if (oneOf([',', ']']) == ']') {
+                        break;
+                    }
+                    s += ',';
+                }
+                s = emitter.emitListStart(subtype) + s + emitter.emitListEnd();
+                return {'s': s, 'type': {'t': 'list', 'subtype': subtype}, 'pos': t.pos, 'cost': cost};
+            }
+        } else if (t.s == '{') {
+            let n = T();
+            if (n.s == '}') {
+                return {'s': emitter.emitEmptyDict(), 'type': {'t': 'emptydict'}, 'pos': t.pos, 'cost': 1};
+            } else {
+                R(n);
+                let s = '';
+                let cost = 1;
+                let keyType = null;
+                let valueType = null;
+                while (true) {
+                    let k = parseExpr(context, depth + 1);
+                    S(':');
+                    let v = parseExpr(context, depth + 1);
+                    cost += v.cost + k.cost;
+                    if (keyType == null) {
+                        keyType = k.type;
+                        valueType = v.type;
+                    } else {
+                        keyType = deriveCommonType(keyType, k.type);
+                        valueType = deriveCommonType(valueType, v.type);
+                        if (keyType == null) {
+                            E(k.pos, "All keys must have the same type.");
+                        }
+                        if (valueType == null) {
+                            E(v.pos, "All values must have the same type.");
+                        }
+                    }
+
+                    s += emitter.emitDictPair(k.s, v.s);
+                    if (oneOf([',', '}']) == '}') {
+                        break;
+                    }
+                    s += ',';
+                }
+                s = emitter.emitDictStart(keyType, valueType) + s + emitter.emitDictEnd();
+                if (keyType.t == 'record') {
+                    if (null == getLessFunc(keyType.record.name)) {
+                        E(t.pos, "Map key must have a method `function less(self: T, other: T) -> bool { }`");
+                    }
+                } else if (keyType.t != 'int' && keyType.t != 'string') {
+                    E(t.pos, "Key type can only be struct, int or string");
+                }
+                return {'s': s, 'type': {'t': 'dict', 'keyType': keyType, 'valueType': valueType}, 'pos': t.pos, 'cost': cost};
+            }
+        } else if (t.s == 'true' || t.s == 'false') {
+            return {'s': t.s, 'type': {'t': 'bool'}, 'pos': t.pos, 'cost': 1};
+        } else if (t.s == 'null') {
+            return {'s': emitter.emitNull(), 'type': {'t': 'null'}, 'pos': t.pos, 'cost': 1};
+        } else if (t.s[0] >= '0' && t.s[0] <= '9') {
+            if (t.s.indexOf('.') == -1) {
+                return {'s': emitter.emitInt(t.s), 'type': {'t': 'int'}, 'pos': t.pos, 'cost': 1};
+            } else {
+                return {'s': t.s, 'type': {'t': 'float'}, 'pos': t.pos, 'cost': 1};
+            }
+        } else if (context.vars[t.s] !== undefined) {
+            return {'s': config.release ? t.s : 'context.vars["' + t.s + '"]', 'type': context.vars[t.s], 'pos': t.pos, 'lhs': true, 'cost': 1}
+        } else if (ret.funcs[t.s] !== undefined) {
+            return {'s': config.release ? t.s : 'context.funcs["' + t.s + '"]', 'type': {'t': 'func', 'args': ret.funcs[t.s].args, 'returnType': ret.funcs[t.s].returnType}, 'pos': t.pos, 'lhs': false, 'cost': 1}
+        } else if (isI(t.s)) {
+            E(t.pos, "Unknown variable or function " + t.s);
+        } else {
+            E(t.pos, "Unexpected token " + t.s);
+        }
+    }
+
+    let parseSingleOrUnary = function(context, depth) {
+        let t = T();
+        if (t.s[0] == '!') {
+            let childExpr = parseSingleOrUnary(context, depth + 1);
+            if (childExpr.type.t != 'bool') {
+                E(childExpr.pos, "Expected boolean expression, got an expression of type " + childExpr.type.t);
+            }
+            return {'s': '!' + childExpr.s, 'type': childExpr.type, 'pos': t.pos, 'cost': childExpr.cost + 1};
+        } else if (t.s[0] == '~') {
+            let childExpr = parseSingleOrUnary(context, depth + 1);
+            if (childExpr.type.t != 'int') {
+                E(childExpr.pos, "Expected integer expression, got an expression of type " + childExpr.type.t);
+            }
+            return {'s': '~' + childExpr.s, 'type': childExpr.type, 'pos': t.pos, 'cost': childExpr.cost + 1};
+        } else if (t.s[0] == '-') {
+            let childExpr = parseSingleOrUnary(context, depth + 1);
+            if (childExpr.type.t != 'int' && childExpr.type.t != 'float') {
+                E(childExpr.pos, "Expected integer or float expression, got an expression of type " + childExpr.type.t);
+            }
+            // Need space after '-', so that two unary minuses do not result in '--'
+            return {'s': '- ' + childExpr.s, 'type': childExpr.type, 'pos': t.pos, 'cost': childExpr.cost + 1};
+        } else {
+            R(t);
+            let last = parseSingle(context, depth);
+            while (true) {
+                let op = T();
+                if (op.s == '.') {
+                    let field = I();
+                    if (last.type.t == 'record') {
+                        let record = last.type.record;
+                        let fullyQualifiedMethodName = record.name + '$' + field.s;
+                        if (field.s in record.fieldTypes) {
+                            last.s = emitter.emitFieldAccess(last.s, field.s);
+                            last.type = record.fieldTypes[field.s];
+                            last.cost += 1;
+                        } else if (ret.funcs[fullyQualifiedMethodName] !== undefined) {
+                            S('(');
+                            let func = ret.funcs[fullyQualifiedMethodName];
+                            parseFunctionCall(context, depth, func, config.release ? fullyQualifiedMethodName : "context.funcs['" + fullyQualifiedMethodName + "']", last, last);
+                            last.lhs = false;
+                        } else {
+                            E(op.pos, field.s + " is not a field or method of " + record.name);
+                        }
+                    } else if (last.type.t == 'list') {
+                        if (field.s == 'length') {
+                            S('('); S(')');
+                            last.s = emitter.emitLength(last.type, last.s);
+                            last.type = {'t': 'int'};
+                            last.cost += 1;
+                        } else if (field.s == 'pop') {
+                            S('('); S(')');
+                            last.s = "(" + last.s + ").pop()";
+                            last.type = {'t': 'void'};
+                            last.cost += 1;
+                        } else if (field.s == 'push') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (null == deriveCommonType(last.type.subtype, arg.type)) {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").push(" + arg.s + ")";
+                            last.type = {'t': 'void'};
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'join') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (arg.type.t != 'string') {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            if (last.type.subtype.t != 'string') {
+                                E(arg.pos, "`join` can only be called on lists of strings");
+                            }
+                            last.s = "(" + last.s + ").join(" + arg.s + ")";
+                            last.type = {'t': 'string'};
+                            last.cost += 1 + arg.cost; // TODO: proper cost
+                        } else if (field.s == 'sort') {
+                            S('('); S(')');
+                            if (last.type.subtype.t == 'string' || last.type.subtype.t == 'int' || last.type.subtype.t == 'float') {
+                                last.s = emitter.emitSort(last.s, last.type.subtype, "(a < b)", "(a > b)");
+                            } else if (last.type.subtype.t == 'record') {
+                                let recordName = last.type.subtype.record.name;
+                                let call = getLessFunc(recordName);
+                                if (call == null) {
+                                    E(field.pos, "Can only sort structs that have a method `function less(self: T, other: T) -> bool { }`");
+                                }
+                                last.s = emitter.emitSort(last.s, last.type.subtype, call('a', 'b'), call('b', 'a'));
+                            } else {
+                                E(last.pos, "Can only sort an array of numbers or strings"); // TODO
+                            }
+                            last.type = {'t': 'void'};
+                            last.cost += 1; // TODO: proper cost
+                        } else {
+                            E(op.pos, field.s + " is not a field or method of list");
+                        }
+                        last.lhs = false;
+                    } else if (last.type.t == 'dict') {
+                        if (field.s == 'length') {
+                            S('('); S(')');
+                            last.s = emitter.emitLength(last.type, last.s);
+                            last.type = {'t': 'int'};
+                            last.cost += 1;
+                        } else if (field.s == 'remove') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (null == deriveCommonType(last.type.keyType, arg.type)) {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").remove(" + arg.s + ")";
+                            last.type = {'t': 'void'};
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'contains') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (null == deriveCommonType(last.type.keyType, arg.type)) {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").contains(" + arg.s + ")";
+                            last.type = {'t': 'bool'};
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'keyAt') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (arg.type.t != 'int') {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").keyAt(" + arg.s + ")";
+                            last.type = last.type.keyType;
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'bisect') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (null == deriveCommonType(last.type.keyType, arg.type)) {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").bisect(" + arg.s + ")";
+                            last.type = {'t': 'int'};
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'keys') {
+                            S('('); S(')');
+                            last.s = emitter.emitDictKeys(last.s);
+                            last.type = {'t': 'list', 'subtype': last.type.keyType};
+                            last.cost += 1;
+                        } else {
+                            E(op.pos, field.s + " is not a field or method of dict");
+                        }
+                        last.lhs = false;
+                    } else if (last.type.t == 'string') {
+                        if (field.s == 'length') {
+                            S('('); S(')');
+                            last.s = emitter.emitLength(last.type, last.s);
+                            last.type = {'t': 'int'};
+                            last.cost += 1;
+                        } else if (field.s == 'trim') {
+                            S('('); S(')');
+                            last.s = "(" + last.s + ").trim()";
+                            last.type = {'t': 'string'};
+                            last.cost += 1; // TODO: proper cost, through context
+                        } else if (field.s == 'charCodeAt') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (arg.type.t != 'int') {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = emitter.emitCharCodeAt(config.release, last.s, arg.s);
+                            last.type = {'t': 'int'};
+                            last.cost += 1 + arg.cost;
+                        } else if (field.s == 'split') {
+                            S('('); let arg = parseExpr(context, depth + 1); S(')');
+                            if (arg.type.t != 'string') {
+                                E(arg.pos, "Type mismatch");
+                            }
+                            last.s = "(" + last.s + ").split(" + arg.s + ")";
+                            last.type = {'t': 'list', 'subtype': {'t': 'string'}};
+                            last.cost += 1 + arg.cost; // TODO: proper cost, through context
+                        } else {
+                            E(op.pos, field.s + " is not a field or method of dict");
+                        }
+                        last.lhs = false;
+                    } else {
+                        E(op.pos, "Type " + last.type.t + " has no fields or methods");
+                    }
+                    continue;
+                } else if (op.s == '[') {
+                    if (last.type.t == 'list' || last.type.t == 'dict') {
+                        let idx = parseExpr(context, depth + 1);
+                        if (last.type.t == 'list' && idx.type.t != 'int') {
+                            E(idx.pos, "Index must be an integer, got " + idx.type.t + " instead");
+                        }
+                        if (last.type.t == 'dict' && null == deriveCommonType(last.type.keyType, idx.type)) {
+                            E(idx.pos, "Wrong key type");
+                        }
+                        last.s = emitter.emitListElem(last.type, config.release, last.s, idx.s);
+                        last.type = (last.type.t == 'list') ? last.type.subtype : last.type.valueType;
+                        last.cost += 1 + idx.cost;
+                        S(']');
+                    } else if (last.type.t == 'string') {
+                        let idx = parseExpr(context, depth + 1);
+                        if (idx.type.t != 'int') {
+                            E(idx.pos, "Index must be an integer, got " + idx.type.t + " instead");
+                        }
+
+                        last.s = emitter.emitListElem(last.type, config.release, last.s, idx.s);
+                        last.cost += 1 + idx.cost;
+                        S(']');
+
+                        last.lhs = false;
+                    } else if (last.type.t == 'emptylist' || last.type.t == 'emptydict') {
+                        E(op.pos, "Cannot index into an empty list or dict.");
+                    } else {
+                        E(op.pos, "Cannot index into an instance of type " + last.type.t)
+                    }
+                    continue;
+                } else if (op.s == '(') {
+                    if (last.type.t == 'func') {
+                        parseFunctionCall(context, depth, last.type, last.s, last, null);
+                    } else {
+                        E(op.pos, "Cannot call an instance of type " + last.type.t)
+                    }
+                    continue;
+                }
+                else {
+                    R(op);
+                    break;
+                }
+            }
+            return last;
+        }
+    }
+
+    let isTypeUncertain = function(t) {
+        if (t.t == 'emptylist' || t.t == 'emptydict' || t.t == 'null') {
+            return true;
+        } else if (t.t == 'list') {
+            return isTypeUncertain(t.subtype);
+        } else if (t.t == 'dict') {
+            return isTypeUncertain(t.keyType) || isTypeUncertain(t.valueType);
+        }
+        return false;
+    }
+
+    let concat = function(op, a, b, retType, andAssign) {
+        let ret;
+
+        if (op == '') {
+            ret = b.s;
+        } else {
+            if (a.type.t == 'list' || a.type.t == 'emptylist') {
+                if (a.type.t == 'emptylist') ret = b.s;
+                else if (b.type.t == 'emptylist') ret = a.s;
+                else ret = "(" + a.s + ").concat(" + b.s + ")";
+            } else {
+                let lhs = a.s; let rhs = b.s;
+
+                if (op == '/' && retType.t == 'int' && !config.release) {
+                    ret = "context.divide(" + lhs + ", " + rhs + ")"
+                } else if (andAssign) {
+                    ret = lhs + op + '=' + rhs;
+                    andAssign = false;
+                } else {
+                    ret = '(' + lhs + op + rhs + ')';
+                }
+            }
+        }
+
+        if (andAssign) {
+            ret = a.s + " = " + ret;
+        }
+
+        return ret;
+    }
+    
+    // Assumes that the opening paren is already read, but does consome the closing one
+    // Changes expr inplace
+    let parseFunctionCall = function(context, depth, funcType, funcExpr, expr, firstArg) {
+        let args = '';
+        let argValues = '';
+        let cost = 1;
+        let firstOrd = 0;
+
+        if (firstArg !== null) {
+            cost += firstArg.cost;
+            args = "'" + funcType.args[0].name + "': " + firstArg.s;
+            argValues = firstArg.s;
+            firstOrd = 1;
+        }
+
+        for (let argOrd = firstOrd; argOrd < funcType.args.length; ++ argOrd) {
+            if (argOrd > 0) {
+                args += ', ';
+                argValues += ', ';
+            }
+            if (argOrd > firstOrd) {
+                S(',');
+            }
+            let v = parseExpr(context, depth + 1);
+            if (null == deriveCommonType(funcType.args[argOrd].type, v.type)) {
+                E(v.pos, "Wrong argument type");
+            }
+            vs = v.s;
+            args += "'" + funcType.args[argOrd].name + "': " + vs;
+            argValues += vs;
+            cost += v.cost;
+        }
+        expr.s = config.release ? '(' + funcExpr + ')(' + argValues + ')' : 'context.funcCall(' + funcExpr + ', {' + args + '})';
+        expr.type = funcType.returnType;
+        expr.cost += cost;
+        S(')');
+    }
+
+    let parseExpr = function(context, depth) {
+        if (depth >= 100) {
+            E(posReadable, "Stack overflow during parsing. Simplify the expression.");
+        }
+        let stack = [parseSingleOrUnary(context, depth + 1)];
+        while (true) {
+            let op = T();
+            let priority = opPriority(op.s);
+            if (priority === null) {
+                R(op);
+                break;
+            }
+            
+            let other = parseSingleOrUnary(context, depth + 1);
+
+            while (stack.length >= 3 && stack[stack.length - 2].priority <= priority) {
+                let stackOther = stack.pop();
+                let stackOp = stack.pop();
+                let stackType = checkOpTypes(stackOp.op, stack[stack.length - 1].type, stackOther.type, stackOp.pos);
+                stack[stack.length - 1].s = concat(stackOp.op, stack[stack.length - 1], stackOther, stackType, false);
+                stack[stack.length - 1].type = stackType;
+                stack[stack.length - 1].returns = stack[stack.length - 1].returns || stackOther.returns;
+                stack[stack.length - 1].cost += stackOther.cost + 1;
+            }
+
+            stack.push({'op': op.s, 'priority': priority, 'pos': op.pos});
+            stack.push(other);
+            stack[0].lhs = false;
+        }
+
+        {
+            while (stack.length >= 3) {
+                let stackOther = stack.pop();
+                let stackOp = stack.pop();
+                let stackType = checkOpTypes(stackOp.op, stack[stack.length - 1].type, stackOther.type, stackOp.pos);
+                stack[stack.length - 1].s = concat(stackOp.op, stack[stack.length - 1], stackOther, stackType, false);
+                stack[stack.length - 1].type = stackType;
+                stack[stack.length - 1].returns = stack[stack.length - 1].returns || stackOther.returns;
+                stack[stack.length - 1].cost += stackOther.cost + 1;
+            }
+            return stack[0];
+        }
+    }
+
+    // `from` is already comsumed
+    let parseLINQ = function(context, depth) {
+        enterScope(context);
+        let varName = I();
+        if (context.vars[varName.s] !== undefined) {
+            E(varName.pos, "Redeclaration of variable " + varName.s);
+        }
+        S('in');
+        let listExpr = parseExpr(context, depth + 1);
+        let cost = 1 + listExpr.cost;
+        if (listExpr.type.t != 'list') {
+            E(listExpr.pos, "Expected expression of type list, got " + listExpr.type.t);
+        }
+        context.vars[varName.s] = listExpr.type.subtype;
+        context.scopes[context.scopes.length - 1].push(varName.s);
+
+        let closureOpening = emitter.emitLINQClosureOpener(varName.s, listExpr.type.subtype, config.release);
+        let whereCondS = null;
+
+        // TODO: cost
+        if (oneOf(['where', 'select']) == 'where') {
+            whereCond = parseExpr(context, depth + 1);
+            if (whereCond.type.t != 'bool') {
+                E(listExpr.pos, "Expected expression of type bool, got " + listExpr.type.t);
+            }
+            whereCondS = whereCond.s;
+            S('select');
+        }
+
+        let selectExpr = parseExpr(context, depth + 1);
+
+        let s = emitter.emitLINQ(closureOpening, listExpr.s, whereCondS, selectExpr.s, selectExpr.type);
+        
+        exitScope(context);
+
+        return { 's': s, 'type': {'t': 'list', 'subtype': selectExpr.type}, 'pos': varName.pos, 'cost': cost }
+    }
+
+    let parseLet = function(context, depth) {
+        let pos = _cloneObj(posReadable);
+        S('let');
+        let varName = I();
+        if (context.vars[varName.s] !== undefined) {
+            E(varName.pos, "Redeclaration of variable " + varName.s);
+        }
+        let varType = null;
+        if (skipIf(':')) {
+            varType = parseType();
+        }
+
+        if (!skipIf('=')) {
+            E(varName.pos, "Variable must be initialized.");
+        }
+
+        let valueExpr = parseExpr(context, depth);
+        if (varType === null) {
+            if (isTypeUncertain(valueExpr.type)) {
+                E(valueExpr.pos, 'Cannot derive type of the variable. Add an explicit type declaration (`let ' + varName.s + ': <type> = <value>`).');
+            }
+            varType = valueExpr.type;
+        } else {
+            if (null == deriveCommonType(varType, valueExpr.type)) {
+                E(valueExpr.pos, "Type mismatch");
+            }
+        }
+
+        context.vars[varName.s] = varType;
+        context.scopes[context.scopes.length - 1].push(varName.s);
+
+        return {'s': config.release ? emitter.emitLet(varType) + ' ' + varName.s + ' = ' + valueExpr.s : 'context.vars["' + varName.s + '"] = ' + valueExpr.s, 'type': {'t': 'void'}, 'pos': pos, 'varName': varName.s, 'cost': valueExpr.cost + 1};
+    }
+
+    let parseExprOrAssignment = function(context, depth) {
+        let expr = parseExpr(context, depth);
+        let t = T();
+        // Here we know it's not '<=', '==' and alike, since parseExpr would have consumed them
+        if (t.s[t.s.length - 1] == '=') {
+            if (!expr.lhs) {
+                E(expr.pos, "Can't assign");
+            }
+            let lhs = expr;
+            let rhs = parseExpr(context, depth);
+            let resultingType = rhs.type;
+            let cost = 1 + lhs.cost + rhs.cost;
+            let underlyingOp = t.s.substring(0, t.s.length - 1);
+            if (t.s != '=') {
+                resultingType = checkOpTypes(underlyingOp, lhs.type, rhs.type, t.pos);
+                // The way += is implemented is by spelling out a = a + b (because otherwise a /= b can't be implemented).
+                // Thus, double charge for lhs
+                cost += lhs.cost;
+            }
+            if (!deriveCommonType(lhs.type, resultingType)) {
+                E(rhs.pos, "Type mismatch");
+            }
+            if (isTypeUncertain(lhs.type)) {
+                E(lhs.pos, "Internal transpiler failure: lhs has uncertain type");
+            }
+            return {'s': concat(underlyingOp, lhs, rhs, resultingType, true), 'type': 'void', 'pos': lhs.pos, 'cost': cost}
+        } else {
+            R(t);
+            return {'s': expr.s, 'type': 'void', 'pos': expr.pos, 'cost': expr.cost};
+        }
+    }
+
+    let parseStatement = function(context, depth) {
+        let t = T();
+        if (t.s == 'let') {
+            R(t);
+            let ret = parseLet(context, depth + 1);
+            ret.s += ';';
+            return ret;
+        } else if (t.s == 'if') {
+            let hasElse = false;
+            let allBranchesReturn = true;
+
+            S('(');
+            let cond = parseExpr(context, depth);
+            let ret = "if (" + cond.s + ") {\n"
+            S(')');
+            if (cond.type.t != 'bool') {
+                E(cond.pos, "Condition must be a boolean expression. Got " + cond.type);
+            }
+            let body = parseBlock(context, depth + 1);
+            ret += body.s;
+            allBranchesReturn = allBranchesReturn && body.returns;
+            ret += "}";
+
+            let cost = cond.cost + 1;
+
+            while (skipIf('else')) {
+                ret += " else ";
+                cost += 1;
+                if (skipIf('if')) {
+                    S('(');
+                    let cond = parseExpr(context, depth);
+                    ret += "if (" + cond.s + ") {\n"
+                    S(')');
+                    if (cond.type.t != 'bool') {
+                        E(cond.pos, "Condition must be a boolean expression");
+                    }
+                } else {
+                    if (hasElse) {
+                        E(t.pos, "Branching has more than one unconditional else");
+                    }
+                    hasElse = true;
+                    ret += "{";
+                }
+                let body = parseBlock(context, depth + 1);
+                ret += body.s;
+                allBranchesReturn = allBranchesReturn && body.returns;
+                ret += "}";
+            }
+            return {'s': ret, 'type': 'void', 'pos': t.pos, 'returns': allBranchesReturn && hasElse, 'cost': cost}
+        } else if (t.s == 'while') {
+            S('(');
+            let cond = parseExpr(context, depth + 1);
+            if (cond.type.t != 'bool') {
+                E(cond.pos, "While condition must be a boolean expression");
+            }
+            S(')');
+            let b = parseBlock(context, depth + 1, cond.cost);
+            return {'s': 'while (' + cond.s + ') {\n' + b.s + '\n}', 'type': 'void', 'pos': t.pos, 'cost': cond.cost + 1};
+        } else if (t.s == 'for') {
+            S('(');
+            let e1 = parseLet(context, depth + 1);
+            let varName = e1.varName;
+            S(';');
+            let e2 = parseExpr(context, depth + 1);
+            if (e2.type.t != 'bool') {
+                E(e2.pos, "For condition must be a boolean expression");
+            }
+            S(';');
+            let e3 = parseExprOrAssignment(context, depth + 1);
+            S(')');
+            let b = parseBlock(context, depth + 1, e2.cost + e3.cost);
+
+            delete context.vars[varName];
+
+            return {'s': 'for (' + e1.s + '; ' + e2.s + '; ' + e3.s + ') {\n' + b.s + '\n}', 'type': 'void', 'pos': t.pos, 'cost': e1.cost + e2.cost + 1};
+        } else if (t.s == 'return') {
+            let s, cost;
+            if (context.returnType.t != 'void') {
+                let expr = parseExpr(context, depth);
+                if (null == deriveCommonType(context.returnType, expr.type)) {
+                    E(expr.pos, "Type mismatch");
+                }
+                exprS = expr.s;
+                s = config.release ? 'return ' + exprS + ';' : 'context.return(' + exprS + '); return;';
+                cost = expr.cost + 1;
+            } else {
+                s = 'return;'
+                cost = 1;
+            }
+            return {'s': s, 'type': {'t': 'void'}, 'pos': t.pos, 'returns': true, 'cost': cost};
+        } else if (t.s == 'continue' || t.s == 'break') {
+            return {'s': t.s + ';', 'type': {'t': 'void'}, 'pos': t.pos, 'cost': 1};
+        } else {
+            R(t);
+            let ret = parseExprOrAssignment(context, depth + 1);
+            ret.s += ';';
+            return ret;
+        }
+    }
+
+    let enterScope = function(context) {
+        context.scopes.push([]);
+    }
+
+    let exitScope = function(context) {
+        let varsInScope = context.scopes.pop();
+        for (let v of varsInScope) {
+            delete context.vars[v];
+        }
+    }
+
+    let parseBlock = function(context, depth, baseCost) {
+        depth = depth || 0;
+        let cost = baseCost || 0;
+
+        let started = clonePos();
+        enterScope(context);
+        S('{');
+        let ret = "";
+        let returns = false;
+        while (true) {
+            while (skipIf(';')) ;
+
+            if (skipIf('}')) {
+                break;
+            }
+
+            let stmt = parseStatement(context, depth);
+
+            if (!config.release) {
+                ret += "context.stack[context.stack.length - 1].pos = {'row': " + stmt.pos.row + ", 'col': " + stmt.pos.col + "}; yield context.stack;\n";
+            }
+            ret += stmt.s;
+            ret += '\n';
+
+            cost += stmt.cost;
+
+            returns = returns || stmt.returns;
+        }
+
+        exitScope(context);
+
+        if (typeof cost != 'number') {
+            E(started, "Internal transpiler failure: cost is undefined");
+        }
+
+        if (!config.release) {
+            ret = "context.costSpent += " + cost + "; if (context.costSpent > context.costLimit) { context['throw']('Execution cost exceeded') };\n" + ret;
+        }
+
+        return {'s': ret, 'type': 'void', 'pos': started, 'returns': returns, 'cost': 1};
+    }
+
+    // Skips the function past the `function` keyword
+    let skipFunc = function() {
+        I(); S('('); balance = 1; while (balance > 0) { let t = T(); if (t.s == '(') ++ balance; if (t.s == ')') -- balance; }
+        if (skipIf('->')) { parseType(); }
+        S('{'); balance = 1; while (balance > 0) { let t = T(); if (t.s == '{') ++ balance; if (t.s == '}') -- balance; }
+    }
+
+    let parseFunc = function(ret, pass, methodOf) {
+        let funcName = I();
+        S('(');
+        let args = [];
+        let context = {
+            'vars': {},
+            'scopes': [[]],
+        };
+
+        if (!skipIf(')')) {
+            while (true) {
+                let argName = I();
+                S(':');
+                let argType = parseType();
+
+                if (context.vars[argName.s] !== undefined) {
+                    E(argName.pos, "Redeclaration of argument " + argName.s);
+                }
+
+                args.push({'name': argName.s, 'type': argType});
+                context.vars[argName.s] = argType;
+                context.scopes[context.scopes.length - 1].push(argName.s);
+
+                if (oneOf([',', ')']) == ')') {
+                    break;
+                }
+            }
+        }
+        let returnType = {'t': 'void'};
+        if (skipIf('->')) {
+            returnType = parseType();
+        }
+
+        if (methodOf != null) {
+            if (args.length == 0 || args[0].type.t != 'record' || args[0].type.record.name != methodOf) {
+                console.log(args[0]);
+                E(funcName.pos, "First argument of a method must be the record type");
+            }
+        }
+
+        let fullyQualifiedName = funcName.s;
+        if (methodOf !== null) {
+            fullyQualifiedName = methodOf + '$' + funcName.s;
+        }
+        if (pass == 0) {
+            if (fullyQualifiedName in ret.funcs) {
+                E(funcName.pos, "Redeclaration of function " + fullyQualifiedName);
+            }
+            ret.funcs[fullyQualifiedName] = {'args': args, 'returnType': returnType};
+            S('{'); balance = 1; while (balance > 0) { let t = T(); if (t.s == '{') ++ balance; if (t.s == '}') -- balance; }
+        } else {
+            context.returnType = returnType;
+            let body = parseBlock(context);
+            if (returnType.t != 'void' && !body.returns) {
+                E(funcName.pos, "Function has a return type, but not all branches return value.");
+            }
+            ret.funcs[fullyQualifiedName]['body'] = body.s;
+        }
+    }
+
+    let ret = _getDefaultRecordsAndMethods(config.pillar_builtints);
+    let records = ret.records;
+
+    // records, two passes: only names on the first
+    for (let pass = 0; pass < 2; ++ pass) {
+        pos = 0;
+        posReadable = {'row': 1, 'col': 1};
+        returned = null;
+
+        while (true) {
+            W();
+            if (pos == s.length) break;
+
+            let t = T();
+            if (t.s == 'struct') {
+                let recordName = I();
+                if (pass == 0) {
+                    if (recordName.s in ret.records) {
+                        E(recordName.pos, "Redeclaration of struct " + recordName.s);
+                    }
+                    ret.records[recordName.s] = {};
+                    S('{'); balance = 1; while (balance > 0) { let t = T(); if (t.s == '{') ++ balance; if (t.s == '}') -- balance; }
+                } else {
+                    let recordFields = [];
+                    let recordFieldTypes = {};
+                    S('{');
+                    while (true) {
+                        if (skipIf('}')) break;
+                        let fieldName = I();
+                        if (fieldName.s == 'function') {
+                            skipFunc();
+                            continue;
+                        }
+                        if (fieldName.s in recordFieldTypes) {
+                            E(fieldName.pos, "Duplicate field " + fieldName.s);
+                        }
+                        S(':');
+                        recordFieldTypes[fieldName.s] = parseType();
+                        recordFields.push(fieldName.s);
+                        if (oneOf([',', '}']) == '}') {
+                            break;
+                        }
+                    }
+                    ret.records[recordName.s]['fields'] = recordFields;
+                    ret.records[recordName.s]['fieldTypes'] = recordFieldTypes;
+                    ret.records[recordName.s]['name'] = recordName.s;
+                }
+            } else if (t.s == 'function') {
+                skipFunc();
+            }
+        }
+    }
+
+    // functions. two passes: only signatures on first
+    for (let pass = 0; pass < 2; ++ pass) {
+        pos = 0;
+        posReadable = {'row': 1, 'col': 1};
+        returned = null;
+
+        while (true) {
+            W();
+            if (pos == s.length) break;
+
+            let t = T();
+            if (t.s == 'struct') {
+                let recordName = I();
+                S('{');
+                while (true) {
+                    if (skipIf('}')) break;
+                    let fieldName = I();
+                    if (fieldName.s == 'function') {
+                        parseFunc(ret, pass, recordName.s);
+                    } else {
+                        S(':');
+                        parseType();
+                        if (oneOf([',', '}']) == '}') {
+                            break;
+                        }
+                    }
+                }
+            } else if (t.s == 'function') {
+                parseFunc(ret, pass, null);
+            } else {
+                E(t.pos, "Unexpected token: " + t.s);
+            }
+        }
+    }
+
+    ret.isSameType = function(t1, t2) { return null != deriveCommonType(t1, t2) }
+
+    return ret;
+}
+
+class ElemAccessor {
+    get inner() {
+        if ((this.t == 'list' || this.t == 'string') && (this.index < 0 || this.index >= this.collection.length)) {
+            this['throw']("List index out of bounds");
+        }
+        return this.t != 'dict' ? this.collection[this.index] : this.collection.get(this.index);
+    }
+    set inner(value) {
+        if (this.t == 'list' && (this.index < 0 || this.index >= this.collection.length)) {
+            this['throw']("List index out of bounds");
+        }
+        if (this.t != 'dict') {
+            this.collection[this.index] = value;
+        } else {
+            this.collection.set(this.index, value);
+        }
+    }
+}
+
+CrowdScript.toJavaScript = function(parsed) {
+    let ret = "let context = {}\n";
+    ret += 'context["throw"] = function(a) { throw a }\n'
+    ret += 'context["makeDict"] = function() { let ret = new AVLTree(console.error, function(a, b) { return a.$less ? a.$less(a, b) : a < b }); for (let i = 0; i < arguments.length; i += 2) { ret.set(arguments[i], arguments[i + 1]); } return ret; }\n'
+    ret += 'context["makeRecord"] = function(lessFn) { return function() { let ret = lessFn ? {"$less": lessFn} : {}; for (let i = 0; i < arguments.length; i += 2) { ret[arguments[i]] = arguments[i + 1]; } return ret; } }\n'
+    ret += 'context["listElem"] = function(t, list, idx) { let ret = new AVLElemAccessor(); ret.t = t; ret.collection = list; ret.index = idx; return ret; }\n';
+    ret += 'context["dictKeys"] = function(dict) { return dict.keys() }\n'
+    ret += 'context["parseInt"] = function(a) { return BigInt(a) }\n' // TODO
+    ret += 'context["nullCheck"] = function(a) { return a; }\n\n'  // TODO?
+    ret += "sin = Math.sin; cos = Math.cos; tan = Math.tan; asin = Math.asin; acos = Math.acos; atan = Math.atan; atan2 = Math.atan2; sqrt = Math.sqrt; log = Math.log; exp = Math.exp;\n"
+    ret += "function rand_bool() { return Math.random() < 0.5 }; function rand_int(n) { return BigInt(Math.floor(Math.random() * Number(n))); }\n"
+    ret += "function chr(a) { return String.fromCharCode(Number(a)) };\n"
+    ret += "class AVLElemAccessor { get inner() { return this.collection.get(this.index); } set inner(value) { this.collection.set(this.index, value); }}\n";
+    ret += AVLTree.toString() + '\n';
+    for (let funcName in parsed.funcs) {
+        if (!parsed.funcs[funcName].builtin) {
+            ret += "function " + funcName + "(" + parsed.funcs[funcName].args.map(x => x.name).join(", ") + ") {\n" + parsed.funcs[funcName].body + "}\n"
+        }
+    }
+    return ret;
+}
+
+CrowdScript.toCPP = function(parsed) {
+    let ret = cppPrelude;
+
+    function getFuncDeclaration(funcName, func)  {
+        return getCppType(func.returnType) + " " + funcName + "(" + func.args.map(x => getCppType(x.type) + " " + x.name).join(", ") + ")";
+    }
+
+    for (let recordName in parsed.records) {
+        let record = parsed.records[recordName];
+        ret += 'struct ' + recordName + ';';
+    }
+    ret += '\n';
+    for (let funcName in parsed.funcs) {
+        if (!parsed.funcs[funcName].builtin) {
+            ret += getFuncDeclaration(funcName, parsed.funcs[funcName]) + ";\n"
+        }
+    }
+    for (let recordName in parsed.records) {
+        let record = parsed.records[recordName];
+        ret += 'struct ' + recordName + '{';
+        for (let i = 0; i < record.fields.length; ++ i) {
+            let fieldName = record.fields[i];
+            ret += getCppType(record.fieldTypes[fieldName]) + ' ' + fieldName + ';';
+        }
+        ret += '};\n'
+        let lessFn = parsed.funcs[recordName + "$less"];
+        if (lessFn && lessFn.returnType.t == 'bool' && lessFn.args.length == 2 && lessFn.args[0].type.t == 'record' && lessFn.args[1].type.t == 'record' && lessFn.args[0].type.record.name == recordName && lessFn.args[1].type.record.name == recordName) {
+            let argType = getCppType({'t': 'record', 'record': record});
+            ret += "bool operator < (" + argType + " " + lessFn.args[0].name + ", " + argType + " " + lessFn.args[1].name + ") {\n" + parsed.funcs[recordName + "$less"].body + "}\n"
+        }
+    }
+
+    for (let funcName in parsed.funcs) {
+        if (!parsed.funcs[funcName].builtin) {
+            ret += getFuncDeclaration(funcName, parsed.funcs[funcName]) + " {\n" + parsed.funcs[funcName].body + "}\n"
+        }
+    }
+    return ret;
+}
+
+CrowdScript.processArgument = function(context, name, type, value) {
+    if (type.t == 'string') {
+        if (typeof value != 'string') {
+            throw "Error when parsing " + name + ": expected string"
+        }
+        return value;
+    } else if (type.t == 'bool') {
+        if (typeof value != 'boolean') {
+            throw "Error when parsing " + name + ": expected bool"
+        }
+        return value;
+    } else if (type.t == 'int') {
+        try {
+            return BigInt(value)
+        } catch {
+            throw "Error when parsing " + name + ": expected number, or a string representing number"
+        }
+    } else if (type.t == 'float') {
+        try {
+            return parseFloat(value)
+        } catch {
+            throw "Error when parsing " + name + ": expected number, or a string representing number"
+        }
+    } else if (type.t == 'list') {
+        if (!Array.isArray(value)) {
+            throw "Error when parsing " + name + ": expected array"
+        }
+        let ret = [];
+        for (let i = 0; i < value.length; ++ i) {
+            ret.push(CrowdScript.processArgument(context, name + "[" + i + "]", type.subtype, value[i]));
+        }
+        return ret;
+    } else if (type.t == 'dict') {
+        let ret = context.makeDict();
+        if (typeof value != 'object') {
+            throw "Error when parsing " + name + ": expected object"
+        } else if (type.keyType.t != 'int' && type.keyType.t != 'string') {
+            throw "Can only parse dicts whose keys are ints or strings"
+        }
+        for (let key in value) {
+            ret.set(key, CrowdScript.processArgument(context, name + "[" + key + "]", type.valueType, value[key]));
+        }
+        return ret;
+    } else if (type.t == 'record') {
+        let ret = {};
+        if (typeof value != 'object') {
+            throw "Error when parsing " + name + ": expected object"
+        }
+        let fieldTypes = type.record.fieldTypes;
+        for (let key in fieldTypes) {
+            if (value[key] === undefined) {
+                throw "Error when parsing " + name + ": missing " + key
+            }
+            ret[key] = CrowdScript.processArgument(context, name + "." + key, fieldTypes[key], value[key]);
+        }
+        return ret;
+    } else {
+        throw "Error when parsing " + name + ": unsupported type " + type.t
+    }
+}
+
+
+CrowdScript.execute = function(parsed, funcName, args) {
+    let compiledFuncs = {};
+
+    let context = new function() {
+        let self = this;
+        this.vars = [];
+        this.funcs = [];
+        this.ret = null;
+        this.stack = [];
+        this.costSpent = 0;
+        this.costLimit = COST_LIMIT;
+
+        this['return'] = function(a) {
+            self.ret = a;
+        };
+        this['throw'] = function(e) {
+            throw {
+                'kind': 'runtime',
+                'stack': _cloneObj(self.stack),
+                'msg': e,
+            }
+        };
+        this.makeDict = function() {
+            let that = this;
+            let ret = new AVLTree(function(e) { that['throw'](e) }, function(a, b) { return a.$less ? a.$less(a, b) : a < b });
+            for (let i = 0; i < arguments.length; i += 2) {
+                ret.set(arguments[i], arguments[i + 1]);
+            }
+            return ret;
+        };
+        this.makeRecord = function(lessFn) {
+            return function() {
+                let that = this;
+                let ret = lessFn ? {'$less': lessFn} : {};
+                for (let i = 0; i < arguments.length; i += 2) {
+                    ret[arguments[i]] = arguments[i + 1];
+                }
+                return ret;
+            }
+        };
+        this.dictKeys = function(dict) {
+            let ret = dict.keys();
+            self.costSpent += ret.length;
+            if (self.costSpent >= self.costLimit) {
+                self['throw']("Execution cost exceeded");
+            }
+            return ret;
+        }
+        this.divide = function(a, b) {
+            try {
+                return a / b
+            } catch {
+                self['throw']("Operation resulted in an invalid integer.");
+            }
+        }
+        this.parseInt = function(a) {
+            try {
+                return BigInt(a);
+            } catch {
+                self['throw']("Operation resulted in an invalid integer.");
+            }
+        };
+        this.listElem = function(t, list, idx) {
+            let ret = new ElemAccessor();
+            ret['throw'] = self['throw'];
+            ret.t = t;
+            ret.collection = list;
+            ret.index = idx;
+            return ret;
+        }
+        this.nullCheck = function(a) {
+            if (a == null) {
+                self['throw']("Null pointer exception");
+            }
+            return a;
+        }
+        this.funcCall = function(func, args) {
+            let savedVars = self.vars;
+
+            self.vars = args;
+            self.ret = null;
+
+            self.stack.push({'func': func.funcName});
+
+            let gen = func.fn(self);
+            while (true) {
+                let n = gen.next();
+                if (!n.done) /*console.log*/(_cloneObj(n.value));
+                else break;
+            }
+            self.stack.pop();
+
+            self.vars = savedVars;
+            return self.ret;
+        }
+    };
+
+    for (let funcName in parsed.funcs) {
+        context.funcs[funcName] = { 'fn': eval("(function*(context) { " + parsed.funcs[funcName].body + "})"), 'name': funcName };
+    }
+
+    let argsProcessed = {};
+    let argSpecs = parsed.funcs[funcName].args;
+    for (let i = 0; i < argSpecs.length; ++ i) {
+        let argSpec = argSpecs[i];
+        argsProcessed[argSpec.name] = CrowdScript.processArgument(context, argSpec.name, argSpec.type, args[argSpec.name]);
+    }
+
+    return context.funcCall(context.funcs[funcName], argsProcessed);
+}
+
+function AVLTree(errorFn, lessFn) {
+    function balance(node) { return node == null ? 0 : node.b }
+    function size(node) { return node == null ? 0 : node.n }
+    function depth(node) { return node == null ? 0 : node.d }
+
+    function update(node) {
+        node.b = depth(node.c[1]) - depth(node.c[0])
+        node.n = size(node.c[0]) + size(node.c[1]) + 1;
+        node.d = Math.max(depth(node.c[0]), depth(node.c[1])) + 1;
+    }
+
+    function rotate(node) {
+        let h = node.b > 0 ? 1 : 0;
+        x = node;
+        y = x.c[h]; z = x.c[1 - h];
+        p = y.c[h]; q = y.c[1 - h];
+        let t = x.k; x.k = y.k; y.k = t;
+        let t2 = x.v; x.v = y.v; y.v = t2;
+        x.c[h] = p; x.c[1 - h] = y; if (p != null) p.p = x;
+        y.c[h] = q; y.c[1 - h] = z; if (z != null) z.p = y;
+        update(y); update(x);
+    }
+
+    function rebalance(node) {
+        update(node);
+        if (node.b == 2 || node.b == -2) {
+            let h = node.b > 0 ? 1 : 0;
+            if (node.c[h].b * node.b < 0) {
+                rotate(node.c[h]);
+            }
+            rotate(node);
+            if (node.b < -1 || node.b > 1) { console.log("WTF"); } // TODO
+        }
+        if (node.p != null) {
+            rebalance(node.p);
+        }
+    }
+
+    function createNode(p, k, v) {
+        return {'p': p, 'k': k, 'v': v, 'b': 0, 'n': 1, 'd': 1, 'c': [null, null]}
+    }
+
+    let root = null;
+
+    this.length = function() { return size(root); }
+    this.set = function(k, v) {
+        if (root == null) { root = createNode(null, k, v) }
+        else {
+            let x = root;
+            while (true) {
+                if (!lessFn(x.k, k) && !lessFn(k, x.k)) {
+                    x.v = v;
+                    break;
+                }
+                let h = lessFn(x.k, k) ? 1 : 0;
+                if (x.c[h] == null) {
+                    x.c[h] = createNode(x, k, v);
+                    rebalance(x);
+                    break;
+                }
+                x = x.c[h];
+            }
+        }
+    }
+    this.remove = function(k) {
+        let x = root;
+        let p = null;
+        let dir = 0;
+        while (true) {
+            if (x == null) {
+                errorFn("Key is not present in the dictionary")
+                return;
+            }
+            if (!lessFn(x.k, k) && !lessFn(k, x.k)) {
+                break;
+            }
+            p = x;
+            dir = lessFn(x.k, k) ? 1 : 0;
+            x = x.c[dir];
+        }
+        if (x.c[1] == null) {
+            if (x.c[0] != null) x.c[0].p = p;
+            if (p != null) {
+                p.c[dir] = x.c[0];
+                rebalance(p);
+            } else {
+                root = x.c[0];
+            }
+        } else {
+            let y = x.c[1];
+            p = x;
+            dir = 1;
+
+            while (y.c[0] != null) {
+                p = y;
+                dir = 0;
+                y = y.c[0];
+            }
+
+            x.k = y.k;
+            x.v = y.v;
+            p.c[dir] = y.c[1];
+            if (y.c[1] != null) y.c[1].p = p;
+            rebalance(p);
+        }
+    }
+    this.contains = function(k) {
+        let x = root;
+        while (true) {
+            if (x == null) {
+                return false;
+            }
+            if (!lessFn(x.k, k) && !lessFn(k, x.k)) {
+                return true;
+            }
+            x = x.c[lessFn(x.k, k) ? 1 : 0];
+        }
+    }
+    this.get = function(k) {
+        let x = root;
+        while (true) {
+            if (x == null) {
+                errorFn("Key is not present in the dictionary")
+                return;
+            }
+            if (!lessFn(x.k, k) && !lessFn(k, x.k)) {
+                return x.v;
+            }
+            x = x.c[lessFn(x.k, k) ? 1 : 0];
+        }
+    }
+    this.at = function(idx, returnKey) {
+        idx = Number(idx);
+        if (idx < 0 || idx >= size(root)) { errorFn("Index out of bounds"); return }
+        let x = root;
+        while (true) {
+            let leftN = size(x.c[0]);
+            if (leftN > idx) { x = x.c[0] }
+            else if (leftN == idx) { return returnKey ? x.k : x.v }
+            else { idx -= leftN + 1; x = x.c[1] }
+        }
+    }
+    this.keyAt = function(idx) { return this.at(idx, true); }
+    this.bisect = function(k) {
+        let x = root;
+        let ret = 0;
+        while (true) {
+            if (x == null) {
+                return BigInt(ret);
+            }
+            if (!lessFn(x.k, k) && !lessFn(k, x.k)) {
+                return BigInt(ret + size(x.c[0]));
+            }
+            let h = lessFn(x.k, k) ? 1 : 0;
+            if (h == 1) {
+                ret = ret + (1 + size(x.c[0]));
+            }
+            x = x.c[h];
+        }
+    }
+    this.keys = function() {
+        let stack = [];
+        let ret = [];
+        if (root != null) stack.push([root, 0]);
+        while (stack.length > 0) {
+            let tuple = stack.pop();
+            if (tuple[1] == 1) {
+                ret.push(tuple[0].k);
+                let child = tuple[0].c[1];
+                if (child != null) {
+                    stack.push([child, 0]);
+                }
+            } else {
+                stack.push([tuple[0], 1]);
+                let child = tuple[0].c[0];
+                if (child != null) {
+                    stack.push([child, 0]);
+                }
+            }
+        }
+        return ret;
+    }
+}
+
+AVLTree.prototype.toJSON = function() {
+    let ret = {};
+    let keys = this.keys();
+    for (let i = 0; i < keys.length; ++ i) {
+        ret[keys[i]] = this.get(keys[i]);
+    }
+    return ret;
+}
+
+if (typeof exports === "object") { module.exports = CrowdScript }
+
+let cppPrelude = function() {/*OPEN
+#include <bits/stdc++.h>
+#include <ext/pb_ds/assoc_container.hpp>
+#include <ext/pb_ds/tree_policy.hpp>
+#include <experimental/random>
+
+class EmptyList { };
+class EmptyDict { };
+
+template <class T, class S>
+struct CommonType { };
+
+struct String;
+
+template <class T>
+struct List {
+    std::shared_ptr<std::vector<T>> inner;
+
+    List() : inner(std::shared_ptr<std::vector<T>>(new std::vector<T>())) {}
+    List(std::vector<T> a) : inner(std::shared_ptr<std::vector<T>>(new std::vector<T>(a))) {}
+    template <class S>
+    List(List<S> a) : inner(std::shared_ptr<std::vector<T>>(new std::vector<T>(a.inner->begin(), a.inner->end()))) {}
+    List(EmptyList) : inner(std::shared_ptr<std::vector<T>>(new std::vector<T>())) {}
+    T &operator[](size_t index) { return (*inner)[index]; }
+    const T &operator[](size_t index) const { return (*inner)[index]; }
+    void push(T value) { inner->push_back(value); }
+    void pop() { inner->pop_back(); }
+    int64_t length() const { return inner->size(); }
+
+    template <class SortFn>
+    void sort(SortFn sortFn) { std::sort(inner->begin(), inner->end(), sortFn); }
+
+    template <class S>
+    List<typename CommonType<T, S>::inner> concat(List<S> other) { List<typename CommonType<T, S>::inner> ret = EmptyList(); ret.inner->insert(ret.inner->end(), inner->begin(), inner->end()); ret.inner->insert(ret.inner->end(), other.inner->begin(), other.inner->end()); return ret; }
+    String join(String delim);
+};
+
+struct String {
+    std::shared_ptr<std::string> inner;
+
+    String() : inner(std::shared_ptr<std::string>(new std::string())) {}
+    String(const char* a) : inner(std::shared_ptr<std::string>(new std::string(a))) {}
+    String(std::string a) : inner(std::shared_ptr<std::string>(new std::string(a))) {}
+    String operator +(String other) { return String(*inner + *other.inner); }
+    operator std::string() { return *inner; }
+    String operator[](size_t index) const { return String(std::string({(*inner)[index]})); }
+    int64_t charCodeAt(size_t index) const { return (*inner)[index]; }
+    String operator+(String &other) const { return String(*inner + *other.inner); }
+    String& operator+=(const String &other) { *inner += *other.inner; return *this; }
+    char operator <(const String &other) const { return *inner < *other.inner; }
+    char operator >(const String &other) const { return *inner > *other.inner; }
+    char operator <=(const String &other) const { return *inner <= *other.inner; }
+    char operator >=(const String &other) const { return *inner >= *other.inner; }
+    char operator ==(const String &other) const { return *inner == *other.inner; }
+    char operator !=(const String &other) const { return *inner != *other.inner; }
+    int64_t length() const { return inner->size(); }
+
+    String trim() {
+        std::string s = *inner;
+        const char* ws = " \t\n\r\f\v";
+        s.erase(s.find_last_not_of(ws) + 1);
+        s.erase(0, s.find_first_not_of(ws));
+        return String(s);
+    }
+    List<String> split(String delim) { std::vector<String> ret; size_t last = 0; size_t next = 0; while ((next = inner->find(*delim.inner, last)) != std::string::npos) {   ret.push_back(String(inner->substr(last, next-last)));   last = next + delim.length(); } ret.push_back(String(inner->substr(last))); return ret; }
+};
+
+template<> String List<String>::join(String delim) {
+    std::string ret; bool first = true; for (const auto& it: *inner) { if (!first) ret += *delim.inner; first = false; ret += *it.inner; } return ret;
+}
+
+template <class K, class V> 
+struct Dict {
+    using Inner = __gnu_pbds::tree<K, V, std::less<K>, __gnu_pbds::rb_tree_tag, __gnu_pbds::tree_order_statistics_node_update>;
+    std::shared_ptr<Inner> inner;
+
+    Dict() : inner(std::shared_ptr<Inner>(new Inner())) {}
+    Dict(std::vector<std::pair<K, V>> a) : inner(std::shared_ptr<Inner>(new Inner(a.begin(), a.end()))) {}
+    template <class K2, class V2>
+    Dict(Dict<K2, V2> a) : inner(std::shared_ptr<Inner>(new Inner(a.inner->begin(), a.inner->end()))) {}
+    Dict(EmptyDict) : inner(std::shared_ptr<Inner>(new Inner())) {}
+    V &operator[](K key) { return (*inner)[key]; }
+    const V &operator[](K key) const { return (*inner)[key]; }
+    int64_t length() const { return inner->size(); }
+    bool contains(const K& k) const { return inner->find(k) != inner->end(); }
+    void remove(const K& k) const { inner->erase(k); }
+    K keyAt(int64_t pos) const { return inner->find_by_order(pos)->first; }
+    int64_t bisect(const K& value) const { return inner->order_of_key(value); }
+
+    List<K> keys() const { std::vector<K> ret; for (auto const& it: *inner) { ret.push_back(it.first); }; return List<K>(ret); }
+};
+
+template <class T> struct CommonType<List<T>, EmptyList> { using inner = List<T>; };
+template <class T> struct CommonType<EmptyList, List<T>> { using inner = List<T>; };
+template <class T, class S> struct CommonType<List<T>, List<S>> { using inner = List<typename CommonType<T, S>::inner>; };
+
+template <class T> struct CommonType<std::nullptr_t, std::shared_ptr<T>> { using inner = std::shared_ptr<T>; };
+template <class T> struct CommonType<std::shared_ptr<T>, std::nullptr_t> { using inner = std::shared_ptr<T>; };
+
+template <class K, class V> struct CommonType<Dict<K, V>, EmptyDict> { using inner = Dict<K, V>; };
+template <class K, class V> struct CommonType<EmptyDict, Dict<K, V>> { using inner = Dict<K, V>; };
+template <class K, class V, class K2, class V2> struct CommonType<Dict<K, V>, Dict<K2, V2>> { using inner = Dict<typename CommonType<K, K2>::inner, typename CommonType<V, V2>::inner>; };
+
+template <> struct CommonType<int64_t, int64_t> { using inner = int64_t; };
+template <> struct CommonType<EmptyList, EmptyList> { using inner = EmptyList; };
+template <> struct CommonType<EmptyDict, EmptyDict> { using inner = EmptyDict; };
+template <> struct CommonType<std::nullptr_t, std::nullptr_t> { using inner = std::nullptr_t; };
+template <> struct CommonType<char, char> { using inner = char; };
+template <> struct CommonType<String, String> { using inner = String; };
+
+int64_t cast_int(long int x) { return x; }
+int64_t cast_int(long long int x) { return x; }
+int64_t cast_int(double x) { return x; }
+int64_t cast_int(String x) { return std::strtoll(x.inner->c_str(), NULL, 10); }
+
+double cast_float(long int x) { return x; }
+double cast_float(long long int x) { return x; }
+double cast_float(double x) { return x; }
+double cast_float(String x) { return std::strtod(x.inner->c_str(), NULL); }
+
+String cast_str(long int x) { return String(std::to_string(x)); }
+String cast_str(long long int x) { return String(std::to_string(x)); }
+String cast_str(double x) { return String(std::to_string(x)); }
+String cast_str(bool x) { return String(std::to_string(x)); }
+String cast_str(String x) { return x; }
+
+bool rand_bool() { return rand() % 100 < 50; }
+int64_t rand_int(int64_t upper) { return std::experimental::randint(int64_t(0), upper); }
+String chr(int64_t x) { return String(std::string({(char)x})); }
+
+template <class T>
+struct TypeHolder { };
+
+template <class T, class S, class Filter, class Mapper>
+List<T> linq(const List<S> &input, Filter filter, Mapper mapper, TypeHolder<T> type_holder) {
+    List<T> ret;
+    for (const auto &it: *input.inner) {
+        if (filter(it)) {
+            ret.push(mapper(it));
+        }
+    }
+    return ret;
+}
+
+CLOSE */}.toString();
+cppPrelude = cppPrelude.substring(cppPrelude.indexOf('OPEN') + 4, cppPrelude.indexOf('CLOSE'));
+
+function prepareCFSubmissionCPP(source) {
+    let p = CrowdScript.parse(source, {'release': true, 'pillar_builtints': false, 'cpp': true});
+    let s = CrowdScript.toCPP(p);
+
+    s += "int main() { std::ios::sync_with_stdio(false) ; std::cin.tie(0) ; std::cout.tie(0) ; std::string line, input; while (std::getline(std::cin, line)) { input += line + \"\\n\"; } std::cout << *solve(String(input)).inner; return 0; }"
+    return s;
+}
+
+function click() {
+    
+}
+
+</script>
+
+<textarea id="t1">
+    
+</textarea>
+<input type="button" value="process" onclick="javascript:click()">
+
+<textarea id="t2">
+    
+</textarea>
