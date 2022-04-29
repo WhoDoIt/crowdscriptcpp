@@ -2140,16 +2140,12 @@ function prepareCFSubmissionCPP(source) {
 }
 
 function click() {
-    
+    document.getElementById("t2").value = prepareCFSubmissionCPP(document.getElementById("t1").value);
 }
 
 </script>
 
-<textarea id="t1">
-    
-</textarea>
+<textarea id="t1"></textarea>
 <input type="button" value="process" onclick="javascript:click()">
-
-<textarea id="t2">
-    
-</textarea>
+<br>
+<textarea id="t2"></textarea>
