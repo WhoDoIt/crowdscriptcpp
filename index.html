@@ -2146,6 +2146,14 @@ function click() {
 </script>
 
 <textarea id="t1"></textarea>
-<input type="button" value="process" onclick="javascript:click()">
+<input type="button" id="but" value="process">
 <br>
 <textarea id="t2"></textarea>
+
+<script  type="text/javascript">
+
+document.querySelector("#but").onclick = function() {
+    click();
+}
+
+</script>
